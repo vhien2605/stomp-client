@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <title>STOMP Client Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/stompjs@2.3.3/lib/stomp.min.js"></script>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 1rem;
+        }
+
+        textarea,
+        input[type="text"] {
+            width: 100%;
+        }
+
+        textarea {
+            height: 150px;
+        }
+
+        #fileInput {
+            margin-top: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>STOMP Client Test</h2>
+
+    <label>WebSocket URL: <input type="text" id="wsUrl" value="http://localhost:8080/ws" /></label><br />
+    <label>Authorization Token: <input type="text" id="authToken" placeholder="Bearer ..." /></label><br />
+    <label>Subscribe Topic(s) (comma-separated): <input type="text" id="subTopic"
+            value="/topic/conversation" /></label><br />
+    <label>Send Destination: <input type="text" id="sendDest" value="/app/message" /></label><br />
+    <button onclick="connect()">Connect</button>
+    <button onclick="disconnect()">Disconnect</button>
+    <button onclick="subscribe()">Subscribe</button>
+    <button onclick="unsubscribeAll()">Unsubscribe All</button>
+
+    <h3>Send Message</h3>
+    <label>Message JSON (use "__FILE__" as placeholder):</label>
+    <textarea id="messageInput" placeholder='{"file1": "__FILE__", "file2": "__FILE__"}'></textarea><br />
+    <label>Attach File(s):</label>
+    <input type="file" id="fileInput" multiple /><br /><br />
+    <button onclick="sendMessage()">Send</button>
+
+    <h3>Logs</h3>
+    <pre id="logs"></pre>
+
+    <script>
+        let stompClient = null;
+        let token = "";
+        let subscriptions = {};
+
+        function log(message) {
+            const logs = document.getElementById("logs");
+            logs.textContent += message + "\n";
+            logs.scrollTop = logs.scrollHeight;
+        }
+
+        function connect() {
+            const socket = new SockJS(document.getElementById("wsUrl").value);
+            stompClient = Stomp.over(socket);
+
+            token = document.getElementById("authToken").value;
+            const headers = {};
+            if (token) {
+                headers.Authorization = token;
+            }
+
+            stompClient.connect(
+                headers,
+                function (frame) {
+                    log("✅ Connected: " + frame);
+                },
+                function (error) {
+                    log("❌ Error: " + error);
+                }
+            );
+        }
+
+        function disconnect() {
+            if (stompClient !== null) {
+                unsubscribeAll();
+                stompClient.disconnect(() => {
+                    log("🔌 Disconnected");
+                });
+            }
+        }
+
+        function subscribe() {
+            if (!stompClient || !stompClient.connected) {
+                log("⚠️ You must connect first before subscribing.");
+                return;
+            }
+
+            const input = document.getElementById("subTopic").value;
+            const topics = input
+                .split(",")
+                .map((t) => t.trim())
+                .filter((t) => t.length > 0);
+
+            topics.forEach((topic) => {
+                if (subscriptions[topic]) {
+                    log(`🔁 Already subscribed to ${topic}. Unsubscribing first.`);
+                    subscriptions[topic].unsubscribe();
+                }
+
+                const sub = stompClient.subscribe(
+                    topic,
+                    function (message) {
+                        log(`[📥 ${topic}] Received: ` + message.body);
+                    },
+                    { Authorization: token }
+                );
+
+                subscriptions[topic] = sub;
+                log("📡 Subscribed to: " + topic);
+            });
+        }
+
+        function unsubscribeAll() {
+            Object.keys(subscriptions).forEach((topic) => {
+                subscriptions[topic].unsubscribe();
+                log("❎ Unsubscribed from: " + topic);
+            });
+            subscriptions = {};
+        }
+
+        function sendMessage() {
+            const destination = document.getElementById("sendDest").value;
+            const messageRaw = document.getElementById("messageInput").value;
+            const fileInput = document.getElementById("fileInput");
+            const files = Array.from(fileInput.files || []);
+
+            if (!stompClient || !stompClient.connected) {
+                log("⚠️ Not connected");
+                return;
+            }
+
+            try {
+                const messageJson = JSON.parse(messageRaw || "{}");
+
+                if (files.length > 0) {
+                    readFilesAsBase64(files).then((filePayloads) => {
+                        let fileIndex = 0;
+
+                        const replaced = replaceFilePlaceholders(messageJson, () => {
+                            if (fileIndex < filePayloads.length) {
+                                return filePayloads[fileIndex++];
+                            } else {
+                                throw new Error("❌ Not enough files for __FILE__ placeholders.");
+                            }
+                        });
+
+                        stompClient.send(destination, { Authorization: token }, JSON.stringify(replaced));
+                        log("📤 Sent with files: " + JSON.stringify(replaced, null, 2));
+                    }).catch((err) => {
+                        log(err.message);
+                    });
+                } else {
+                    const fileCount = countFilePlaceholders(messageJson);
+                    if (fileCount > 0) {
+                        log("⚠️ You included __FILE__ placeholders but no files selected.");
+                        return;
+                    }
+
+                    stompClient.send(destination, { Authorization: token }, JSON.stringify(messageJson));
+                    log("📤 Sent: " + JSON.stringify(messageJson, null, 2));
+                }
+            } catch (e) {
+                log("❌ Invalid JSON: " + e.message);
+            }
+        }
+
+        function countFilePlaceholders(obj) {
+            let count = 0;
+            const traverse = (node) => {
+                if (node === "__FILE__") count++;
+                else if (Array.isArray(node)) node.forEach(traverse);
+                else if (typeof node === "object" && node !== null)
+                    Object.values(node).forEach(traverse);
+            };
+            traverse(obj);
+            return count;
+        }
+
+        function readFilesAsBase64(files) {
+            return Promise.all(files.map(file => {
+                return new Promise((resolve, reject) => {
+                    const reader = new FileReader();
+                    reader.onload = function (event) {
+                        const base64Data = event.target.result.split(",")[1];
+                        resolve({
+                            name: file.name,
+                            type: file.type,
+                            base64Data: base64Data
+                        });
+                    };
+                    reader.onerror = reject;
+                    reader.readAsDataURL(file);
+                });
+            }));
+        }
+
+        function replaceFilePlaceholders(obj, getNextFile) {
+            if (typeof obj === "string" && obj === "__FILE__") {
+                return getNextFile();
+            } else if (Array.isArray(obj)) {
+                return obj.map((item) => replaceFilePlaceholders(item, getNextFile));
+            } else if (typeof obj === "object" && obj !== null) {
+                const replaced = {};
+                for (const key in obj) {
+                    replaced[key] = replaceFilePlaceholders(obj[key], getNextFile);
+                }
+                return replaced;
+            } else {
+                return obj;
+            }
+        }
+    </script>
+</body>
+
+</html>
