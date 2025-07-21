@@ -1,1 +1,1 @@
-stomp client made by vibe coding for test socket api
+stomp client made by vibe coding for testing socket api
