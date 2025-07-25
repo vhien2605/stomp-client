@@ -48,6 +48,7 @@
     <button onclick="sendMessage()">Send</button>
 
     <h3>Logs</h3>
+    <button onclick="clearLogs()">Clear Log</button>
     <pre id="logs"></pre>
 
     <script>
@@ -59,6 +60,10 @@
             const logs = document.getElementById("logs");
             logs.textContent += message + "\n";
             logs.scrollTop = logs.scrollHeight;
+        }
+
+        function clearLogs() {
+            document.getElementById("logs").textContent = "";
         }
 
         function connect() {
